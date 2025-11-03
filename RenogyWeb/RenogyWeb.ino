@@ -62,6 +62,10 @@ struct Controller_data {
   bool street_light_status;           // bool (from street light controller)
   uint16_t charging_state_raw;        // raw register 0x0120 value for debugging
 
+  // WiFi signal monitoring
+  int8_t wifi_rssi;                   // WiFi signal strength in dBm (e.g., -65)
+  const char* wifi_quality;           // Human-readable quality: "Excellent", "Good", "Fair", "Weak", "Poor"
+
   // convenience values
   float battery_temperatureF;     // fahrenheit
   float controller_temperatureF;  // fahrenheit
@@ -103,6 +107,15 @@ const char* get_charging_state_string(uint8_t state) {
   }
 }
 
+// Helper function to convert WiFi RSSI (dBm) to human-readable quality string
+const char* get_wifi_quality_string(int8_t rssi) {
+  if (rssi >= -50) return "Excellent";
+  else if (rssi >= -60) return "Good";
+  else if (rssi >= -70) return "Fair";
+  else if (rssi >= -80) return "Weak";
+  else return "Poor";
+}
+
 // Poll the data from the controller and store it in the renogy_info and renogy_data structs
 void readRenogyRegisters(){
   static uint32_t i;
@@ -113,6 +126,10 @@ void readRenogyRegisters(){
   // set word 1 of TX buffer to most-significant word of counter (bits 31..16)
   node.setTransmitBuffer(1, highWord(i));
 
+  // Read WiFi signal strength
+  renogy_data.wifi_rssi = WiFi.RSSI();
+  renogy_data.wifi_quality = get_wifi_quality_string(renogy_data.wifi_rssi);
+
   renogy_read_data_registers();
   renogy_read_info_registers();
 }
@@ -122,6 +139,10 @@ void readRenogyRegisters(){
 void handleRoot() {
   readRenogyRegisters();
   String message = "<html><body><table><tr><th colspan='2'>Renogy Wanderer Stats</th></tr>";
+
+  // WiFi Signal - prominently displayed at top
+  message += "<tr><td><strong>WiFi Signal</strong></td><td><strong>" + String(renogy_data.wifi_rssi) + " dBm (" + String(renogy_data.wifi_quality) + ")</strong></td>";
+
   message += "<tr><td>Battery State of Charge</td><td>" + String(renogy_data.battery_soc) + " %</td>";
   message += "<tr><td>Battery Voltage</td><td>" + String(renogy_data.battery_voltage) + " V</td>";
   message += "<tr><td>Battery Charge Current</td><td>" + String(renogy_data.battery_charging_amps) + " A</td>";
@@ -213,6 +234,10 @@ void restView() {
   jsonDoc["total_battery_overcharges"] = renogy_data.total_battery_overcharges;
   jsonDoc["total_battery_fullcharges"] = renogy_data.total_battery_fullcharges;
   jsonDoc["last_update_time"] = renogy_data.last_update_time;
+
+  // WiFi signal information
+  jsonDoc["wifi_rssi"] = renogy_data.wifi_rssi;
+  jsonDoc["wifi_quality"] = renogy_data.wifi_quality;
 
   // Charging state information (register 0x0120)
   jsonDoc["charging_state"] = renogy_data.charging_state;
