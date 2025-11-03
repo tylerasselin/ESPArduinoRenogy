@@ -1,3 +1,5 @@
+#include <ModbusMaster.h>
+
 #include <ESP8266WiFi.h>
 #include <WiFiClient.h>
 #include <ESP8266WebServer.h>
@@ -15,6 +17,8 @@
 
 const char* ssid = STASSID;
 const char* password = STAPSK;
+// const char* ssid = "NikolaTesla2G";
+// const char* password = "$unsetHippo1326";
 
 String wifiHostname = "RenogyESP";
 
@@ -201,7 +205,7 @@ void restView() {
   jsonDoc["hardware_version"] = renogy_info.hardware_version;
   jsonDoc["serial_number"] = renogy_info.serial_number;
 
-  server.send(200, "text/plain", JSON.stringify(jsonDoc));
+  server.send(200, "application/json", JSON.stringify(jsonDoc));
 }
 
 // Allow control of the load
@@ -279,7 +283,11 @@ void setup(void) {
   // If you're using an ESP32 or other MCU with more than one UART you will 
   // probably want to use a second serial port for this and use the "main" one for debugging
   // I have commented out any serial debugging that was in the original code
+  
   Serial.begin(9600, SERIAL_8N1);
+  // Serial.begin(9600); // For debugging
+  
+  Serial.println(F("Starting..."));
 
   int modbus_address = 255;
   node.begin(modbus_address, Serial);
@@ -287,8 +295,22 @@ void setup(void) {
   WiFi.mode(WIFI_STA);
   WiFi.hostname(wifiHostname);
   WiFi.begin(ssid, password);
+  // WiFi.begin("NikolaTesla2G", "$unsetHippo1326");
 
-  MDNS.begin(wifiHostname);
+  Serial.print("\r\nMAC Address: ");
+  Serial.println(WiFi.macAddress());
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.print(".");
+  }
+
+  if (WiFi.status() == WL_CONNECTED){
+    Serial.print("\r\nConnected: local ip address is http://");
+    Serial.println(WiFi.localIP());
+  }
+  
+  MDNS.begin(wifiHostname); 
 
   // Webserver Pages
   server.on("/", handleRoot);
