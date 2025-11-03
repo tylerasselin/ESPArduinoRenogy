@@ -7,22 +7,12 @@
 #include <ModbusMaster.h>
 #include <ArduinoOTA.h>
 #include <Arduino_JSON.h>
-
-#include "wifiInfo.h"
-
-#ifndef STASSID
-#define STASSID "ssid"
-#define STAPSK "psk"
-#endif
-
-const char* ssid = STASSID;
-const char* password = STAPSK;
-// const char* ssid = "NikolaTesla2G";
-// const char* password = "$unsetHippo1326";
+#include <WiFiManager.h>  // WiFiManager library for easy WiFi configuration
 
 String wifiHostname = "RenogyESP";
 
 ESP8266WebServer server(80);
+WiFiManager wifiManager;
 
 ModbusMaster node;
 
@@ -156,6 +146,10 @@ void handleRoot() {
     message += "<tr><td>Load Status</td><td>Off</td>";
   }
   message += "<tr><td><a href='/load?on'>On</a></td><td><a href='/load?off'>Off</a></td>";
+
+  message += "<tr><th colspan='2'>Configuration</th></tr>";
+  message += "<tr><td colspan='2'><a href='/wificonfig'>Configure WiFi Settings</a></td></tr>";
+
   message += "</table></body></html>";
 
   server.send(200, "text/html", message);
@@ -216,11 +210,30 @@ void toggleLoad(){
   else if(server.hasArg("off")){
     renogy_control_load(0);
   }
-  // It takes a moment for the command to take effect 
+  // It takes a moment for the command to take effect
   delay(1000);
   // Redirect to homepage
   server.sendHeader("Location", "/", true);
   server.send(302);
+}
+
+// Start WiFi configuration portal on-demand
+void handleWifiConfig(){
+  String message = "<html><body>";
+  message += "<h2>WiFi Configuration</h2>";
+  message += "<p>Starting WiFi configuration portal...</p>";
+  message += "<p>1. Connect to the WiFi network: <strong>RenogyESP-Config</strong></p>";
+  message += "<p>2. A configuration page should open automatically</p>";
+  message += "<p>3. If not, navigate to <strong>192.168.4.1</strong></p>";
+  message += "<p>4. Enter your new WiFi credentials and save</p>";
+  message += "<p>5. The device will restart and connect to the new network</p>";
+  message += "<p><a href='/'>Return to home</a></p>";
+  message += "</body></html>";
+  server.send(200, "text/html", message);
+
+  // Start the configuration portal (non-blocking for 180 seconds)
+  wifiManager.setConfigPortalTimeout(180);
+  wifiManager.startConfigPortal("RenogyESP-Config");
 }
 
 // List the modbus registers for debugging
@@ -280,45 +293,50 @@ void handleNotFound() {
 void setup(void) {
 
   // ESP8266 only has one hardware serial UART, which I'm using with the Wanderer
-  // If you're using an ESP32 or other MCU with more than one UART you will 
+  // If you're using an ESP32 or other MCU with more than one UART you will
   // probably want to use a second serial port for this and use the "main" one for debugging
   // I have commented out any serial debugging that was in the original code
-  
+
   Serial.begin(9600, SERIAL_8N1);
   // Serial.begin(9600); // For debugging
-  
+
   Serial.println(F("Starting..."));
 
   int modbus_address = 255;
   node.begin(modbus_address, Serial);
 
+  // WiFiManager auto-connects to saved WiFi credentials
+  // If connection fails or no credentials saved, it starts a config portal
   WiFi.mode(WIFI_STA);
   WiFi.hostname(wifiHostname);
-  WiFi.begin(ssid, password);
-  // WiFi.begin("NikolaTesla2G", "$unsetHippo1326");
 
   Serial.print("\r\nMAC Address: ");
   Serial.println(WiFi.macAddress());
 
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(1000);
-    Serial.print(".");
+  // Auto-connect to saved WiFi or start config portal if needed
+  // Will create AP "RenogyESP-AutoConnect" if no saved credentials
+  wifiManager.setConfigPortalTimeout(180);  // 3 minute timeout for config portal
+  if (!wifiManager.autoConnect("RenogyESP-AutoConnect")) {
+    Serial.println("Failed to connect and hit timeout");
+    delay(3000);
+    // Reset and try again
+    ESP.restart();
+    delay(5000);
   }
 
-  if (WiFi.status() == WL_CONNECTED){
-    Serial.print("\r\nConnected: local ip address is http://");
-    Serial.println(WiFi.localIP());
-  }
-  
-  MDNS.begin(wifiHostname); 
+  Serial.print("\r\nConnected: local ip address is http://");
+  Serial.println(WiFi.localIP());
+
+  MDNS.begin(wifiHostname);
 
   // Webserver Pages
   server.on("/", handleRoot);
   server.on("/rest", restView);
   server.on("/load", toggleLoad);
+  server.on("/wificonfig", handleWifiConfig);
   server.on("/modbustest", modbustest);
   server.onNotFound(handleNotFound);
- 
+
   server.begin();
   ArduinoOTA.begin();
 }
