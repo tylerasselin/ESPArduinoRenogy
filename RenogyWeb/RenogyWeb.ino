@@ -56,6 +56,12 @@ struct Controller_data {
   uint8_t total_battery_overcharges;  // count
   uint8_t total_battery_fullcharges;  // count
 
+  // Register 0x0120 - Load Status, Load Brightness, Charging State
+  uint8_t charging_state;             // 0-6: 0=deactivated, 1=activated, 2=mppt, 3=equalize, 4=boost, 5=float, 6=limiting
+  uint8_t load_brightness;            // 0-100 percent (from street light controller)
+  bool street_light_status;           // bool (from street light controller)
+  uint16_t charging_state_raw;        // raw register 0x0120 value for debugging
+
   // convenience values
   float battery_temperatureF;     // fahrenheit
   float controller_temperatureF;  // fahrenheit
@@ -83,6 +89,20 @@ struct Controller_info {
 };
 Controller_info renogy_info;
 
+// Helper function to convert charging state value to human-readable string
+const char* get_charging_state_string(uint8_t state) {
+  switch(state) {
+    case 0: return "Deactivated";
+    case 1: return "Activated";
+    case 2: return "MPPT/Bulk";
+    case 3: return "Equalizing";
+    case 4: return "Boost";
+    case 5: return "Floating";
+    case 6: return "Current Limiting";
+    default: return "Unknown";
+  }
+}
+
 // Poll the data from the controller and store it in the renogy_info and renogy_data structs
 void readRenogyRegisters(){
   static uint32_t i;
@@ -106,6 +126,10 @@ void handleRoot() {
   message += "<tr><td>Battery Voltage</td><td>" + String(renogy_data.battery_voltage) + " V</td>";
   message += "<tr><td>Battery Charge Current</td><td>" + String(renogy_data.battery_charging_amps) + " A</td>";
   message += "<tr><td>Battery Charge Power</td><td>" + String(renogy_data.battery_charging_watts) + " W</td>";
+
+  // Charging State - prominently displayed with debug info
+  message += "<tr><td><strong>Charging Mode</strong></td><td><strong>" + String(get_charging_state_string(renogy_data.charging_state)) + "</strong> (0x" + String(renogy_data.charging_state_raw, HEX) + ")</td>";
+
   message += "<tr><td>Controller Temperature</td><td>" + String(renogy_data.controller_temperature) + "&deg;C</td>";
   message += "<tr><td>Battery Temperature</td><td>" + String(renogy_data.battery_temperature) + "&deg;C</td>";
   message += "<tr><td>Load Voltage</td><td>" + String(renogy_data.load_voltage) + " V</td>";
@@ -190,6 +214,13 @@ void restView() {
   jsonDoc["total_battery_fullcharges"] = renogy_data.total_battery_fullcharges;
   jsonDoc["last_update_time"] = renogy_data.last_update_time;
 
+  // Charging state information (register 0x0120)
+  jsonDoc["charging_state"] = renogy_data.charging_state;
+  jsonDoc["charging_state_label"] = get_charging_state_string(renogy_data.charging_state);
+  jsonDoc["charging_state_raw"] = renogy_data.charging_state_raw;
+  jsonDoc["street_light_status"] = renogy_data.street_light_status;
+  jsonDoc["load_brightness"] = renogy_data.load_brightness;
+
   jsonDoc["voltage_rating"] = renogy_info.voltage_rating;
   jsonDoc["amp_rating"] = renogy_info.amp_rating;
   jsonDoc["discharge_amp_rating"] = renogy_info.discharge_amp_rating;
@@ -258,6 +289,40 @@ void modbustest(){
 
       message += String(j) + ": " + String(data_registers[j]) + "\n";
     }
+
+    // Detailed breakdown of register 32 (0x0120) - Charging State
+    message += "\n=== Register 32 (0x0120) Detailed Breakdown ===\n";
+    uint16_t reg_0x0120 = data_registers[32];
+    message += "Raw Value (Hex): 0x" + String(reg_0x0120, HEX) + "\n";
+    message += "Raw Value (Dec): " + String(reg_0x0120) + "\n";
+    message += "Raw Value (Bin): ";
+    for (int bit = 15; bit >= 0; bit--) {
+      message += ((reg_0x0120 >> bit) & 1) ? "1" : "0";
+      if (bit == 8) message += " ";  // Space between bytes
+    }
+    message += "\n\n";
+
+    // Parse components
+    uint8_t charging_state = reg_0x0120 & 0x00FF;
+    bool street_light = (reg_0x0120 >> 15) & 0x01;
+    uint8_t brightness = (reg_0x0120 >> 8) & 0x7F;
+
+    message += "High Byte (0x" + String((reg_0x0120 >> 8), HEX) + "):\n";
+    message += "  - Bit 15 (Street Light Status): " + String(street_light) + (street_light ? " (ON)" : " (OFF)") + "\n";
+    message += "  - Bits 8-14 (Load Brightness): " + String(brightness) + "%\n";
+    message += "\n";
+    message += "Low Byte (0x" + String(charging_state, HEX) + "):\n";
+    message += "  - Charging State Value: " + String(charging_state) + "\n";
+    message += "  - Charging State: " + String(get_charging_state_string(charging_state)) + "\n";
+    message += "\nCharging State Legend:\n";
+    message += "  0 = Deactivated\n";
+    message += "  1 = Activated\n";
+    message += "  2 = MPPT/Bulk\n";
+    message += "  3 = Equalizing\n";
+    message += "  4 = Boost\n";
+    message += "  5 = Floating\n";
+    message += "  6 = Current Limiting\n";
+    message += "==========================================\n\n";
   }
 
   uint8_t k, result2;
@@ -413,14 +478,22 @@ void renogy_read_data_registers() {
     renogy_data.controller_uptime_days = data_registers[21];
     renogy_data.total_battery_overcharges = data_registers[22];
     renogy_data.total_battery_fullcharges = data_registers[23];
+
+    // Register 0x120 - Load Status, Load Brightness, Charging State - index 32
+    // High byte: bit 7 = street light status, bits 0-6 = load brightness (0-100%)
+    // Low byte: charging state (0-6)
+    renogy_data.charging_state_raw = data_registers[32];
+    renogy_data.charging_state = renogy_data.charging_state_raw & 0x00FF;  // Extract low byte
+    renogy_data.street_light_status = (renogy_data.charging_state_raw >> 15) & 0x01;  // Extract bit 15
+    renogy_data.load_brightness = (renogy_data.charging_state_raw >> 8) & 0x7F;  // Extract bits 8-14
+
     renogy_data.last_update_time = millis();
 
-    // Add these registers:
+    // TODO: Add these registers in future:
     //Registers 0x118 to 0x119- Total Charging Amp-Hours - 24/25
     //Registers 0x11A to 0x11B- Total Discharging Amp-Hours - 26/27
     //Registers 0x11C to 0x11D- Total Cumulative power generation (kWH) - 28/29
     //Registers 0x11E to 0x11F- Total Cumulative power consumption (kWH) - 30/31
-    //Register 0x120 - Load Status, Load Brightness, Charging State - 32
     //Registers 0x121 to 0x122 - Controller fault codes - 33/34
 
     if (print_data) Serial.println("---");
