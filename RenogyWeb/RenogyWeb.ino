@@ -7,22 +7,12 @@
 #include <ModbusMaster.h>
 #include <ArduinoOTA.h>
 #include <Arduino_JSON.h>
-
-#include "wifiInfo.h"
-
-#ifndef STASSID
-#define STASSID "ssid"
-#define STAPSK "psk"
-#endif
-
-const char* ssid = STASSID;
-const char* password = STAPSK;
-// const char* ssid = "NikolaTesla2G";
-// const char* password = "$unsetHippo1326";
+#include <WiFiManager.h>  // WiFiManager library for easy WiFi configuration
 
 String wifiHostname = "RenogyESP";
 
 ESP8266WebServer server(80);
+WiFiManager wifiManager;
 
 ModbusMaster node;
 
@@ -66,6 +56,16 @@ struct Controller_data {
   uint8_t total_battery_overcharges;  // count
   uint8_t total_battery_fullcharges;  // count
 
+  // Register 0x0120 - Load Status, Load Brightness, Charging State
+  uint8_t charging_state;             // 0-6: 0=deactivated, 1=activated, 2=mppt, 3=equalize, 4=boost, 5=float, 6=limiting
+  uint8_t load_brightness;            // 0-100 percent (from street light controller)
+  bool street_light_status;           // bool (from street light controller)
+  uint16_t charging_state_raw;        // raw register 0x0120 value for debugging
+
+  // WiFi signal monitoring
+  int8_t wifi_rssi;                   // WiFi signal strength in dBm (e.g., -65)
+  const char* wifi_quality;           // Human-readable quality: "Excellent", "Good", "Fair", "Weak", "Poor"
+
   // convenience values
   float battery_temperatureF;     // fahrenheit
   float controller_temperatureF;  // fahrenheit
@@ -93,6 +93,29 @@ struct Controller_info {
 };
 Controller_info renogy_info;
 
+// Helper function to convert charging state value to human-readable string
+const char* get_charging_state_string(uint8_t state) {
+  switch(state) {
+    case 0: return "Deactivated";
+    case 1: return "Activated";
+    case 2: return "MPPT/Bulk";
+    case 3: return "Equalizing";
+    case 4: return "Boost";
+    case 5: return "Floating";
+    case 6: return "Current Limiting";
+    default: return "Unknown";
+  }
+}
+
+// Helper function to convert WiFi RSSI (dBm) to human-readable quality string
+const char* get_wifi_quality_string(int8_t rssi) {
+  if (rssi >= -50) return "Excellent";
+  else if (rssi >= -60) return "Good";
+  else if (rssi >= -70) return "Fair";
+  else if (rssi >= -80) return "Weak";
+  else return "Poor";
+}
+
 // Poll the data from the controller and store it in the renogy_info and renogy_data structs
 void readRenogyRegisters(){
   static uint32_t i;
@@ -103,6 +126,10 @@ void readRenogyRegisters(){
   // set word 1 of TX buffer to most-significant word of counter (bits 31..16)
   node.setTransmitBuffer(1, highWord(i));
 
+  // Read WiFi signal strength
+  renogy_data.wifi_rssi = WiFi.RSSI();
+  renogy_data.wifi_quality = get_wifi_quality_string(renogy_data.wifi_rssi);
+
   renogy_read_data_registers();
   renogy_read_info_registers();
 }
@@ -112,10 +139,18 @@ void readRenogyRegisters(){
 void handleRoot() {
   readRenogyRegisters();
   String message = "<html><body><table><tr><th colspan='2'>Renogy Wanderer Stats</th></tr>";
+
+  // WiFi Signal - prominently displayed at top
+  message += "<tr><td><strong>WiFi Signal</strong></td><td><strong>" + String(renogy_data.wifi_rssi) + " dBm (" + String(renogy_data.wifi_quality) + ")</strong></td>";
+
   message += "<tr><td>Battery State of Charge</td><td>" + String(renogy_data.battery_soc) + " %</td>";
   message += "<tr><td>Battery Voltage</td><td>" + String(renogy_data.battery_voltage) + " V</td>";
   message += "<tr><td>Battery Charge Current</td><td>" + String(renogy_data.battery_charging_amps) + " A</td>";
   message += "<tr><td>Battery Charge Power</td><td>" + String(renogy_data.battery_charging_watts) + " W</td>";
+
+  // Charging State - prominently displayed with debug info
+  message += "<tr><td><strong>Charging Mode</strong></td><td><strong>" + String(get_charging_state_string(renogy_data.charging_state)) + "</strong> (0x" + String(renogy_data.charging_state_raw, HEX) + ")</td>";
+
   message += "<tr><td>Controller Temperature</td><td>" + String(renogy_data.controller_temperature) + "&deg;C</td>";
   message += "<tr><td>Battery Temperature</td><td>" + String(renogy_data.battery_temperature) + "&deg;C</td>";
   message += "<tr><td>Load Voltage</td><td>" + String(renogy_data.load_voltage) + " V</td>";
@@ -156,6 +191,10 @@ void handleRoot() {
     message += "<tr><td>Load Status</td><td>Off</td>";
   }
   message += "<tr><td><a href='/load?on'>On</a></td><td><a href='/load?off'>Off</a></td>";
+
+  message += "<tr><th colspan='2'>Configuration</th></tr>";
+  message += "<tr><td colspan='2'><a href='/wificonfig'>Configure WiFi Settings</a></td></tr>";
+
   message += "</table></body></html>";
 
   server.send(200, "text/html", message);
@@ -196,6 +235,17 @@ void restView() {
   jsonDoc["total_battery_fullcharges"] = renogy_data.total_battery_fullcharges;
   jsonDoc["last_update_time"] = renogy_data.last_update_time;
 
+  // WiFi signal information
+  jsonDoc["wifi_rssi"] = renogy_data.wifi_rssi;
+  jsonDoc["wifi_quality"] = renogy_data.wifi_quality;
+
+  // Charging state information (register 0x0120)
+  jsonDoc["charging_state"] = renogy_data.charging_state;
+  jsonDoc["charging_state_label"] = get_charging_state_string(renogy_data.charging_state);
+  jsonDoc["charging_state_raw"] = renogy_data.charging_state_raw;
+  jsonDoc["street_light_status"] = renogy_data.street_light_status;
+  jsonDoc["load_brightness"] = renogy_data.load_brightness;
+
   jsonDoc["voltage_rating"] = renogy_info.voltage_rating;
   jsonDoc["amp_rating"] = renogy_info.amp_rating;
   jsonDoc["discharge_amp_rating"] = renogy_info.discharge_amp_rating;
@@ -216,11 +266,30 @@ void toggleLoad(){
   else if(server.hasArg("off")){
     renogy_control_load(0);
   }
-  // It takes a moment for the command to take effect 
+  // It takes a moment for the command to take effect
   delay(1000);
   // Redirect to homepage
   server.sendHeader("Location", "/", true);
   server.send(302);
+}
+
+// Start WiFi configuration portal on-demand
+void handleWifiConfig(){
+  String message = "<html><body>";
+  message += "<h2>WiFi Configuration</h2>";
+  message += "<p>Starting WiFi configuration portal...</p>";
+  message += "<p>1. Connect to the WiFi network: <strong>RenogyESP-Config</strong></p>";
+  message += "<p>2. A configuration page should open automatically</p>";
+  message += "<p>3. If not, navigate to <strong>192.168.4.1</strong></p>";
+  message += "<p>4. Enter your new WiFi credentials and save</p>";
+  message += "<p>5. The device will restart and connect to the new network</p>";
+  message += "<p><a href='/'>Return to home</a></p>";
+  message += "</body></html>";
+  server.send(200, "text/html", message);
+
+  // Start the configuration portal (non-blocking for 180 seconds)
+  wifiManager.setConfigPortalTimeout(180);
+  wifiManager.startConfigPortal("RenogyESP-Config");
 }
 
 // List the modbus registers for debugging
@@ -245,6 +314,40 @@ void modbustest(){
 
       message += String(j) + ": " + String(data_registers[j]) + "\n";
     }
+
+    // Detailed breakdown of register 32 (0x0120) - Charging State
+    message += "\n=== Register 32 (0x0120) Detailed Breakdown ===\n";
+    uint16_t reg_0x0120 = data_registers[32];
+    message += "Raw Value (Hex): 0x" + String(reg_0x0120, HEX) + "\n";
+    message += "Raw Value (Dec): " + String(reg_0x0120) + "\n";
+    message += "Raw Value (Bin): ";
+    for (int bit = 15; bit >= 0; bit--) {
+      message += ((reg_0x0120 >> bit) & 1) ? "1" : "0";
+      if (bit == 8) message += " ";  // Space between bytes
+    }
+    message += "\n\n";
+
+    // Parse components
+    uint8_t charging_state = reg_0x0120 & 0x00FF;
+    bool street_light = (reg_0x0120 >> 15) & 0x01;
+    uint8_t brightness = (reg_0x0120 >> 8) & 0x7F;
+
+    message += "High Byte (0x" + String((reg_0x0120 >> 8), HEX) + "):\n";
+    message += "  - Bit 15 (Street Light Status): " + String(street_light) + (street_light ? " (ON)" : " (OFF)") + "\n";
+    message += "  - Bits 8-14 (Load Brightness): " + String(brightness) + "%\n";
+    message += "\n";
+    message += "Low Byte (0x" + String(charging_state, HEX) + "):\n";
+    message += "  - Charging State Value: " + String(charging_state) + "\n";
+    message += "  - Charging State: " + String(get_charging_state_string(charging_state)) + "\n";
+    message += "\nCharging State Legend:\n";
+    message += "  0 = Deactivated\n";
+    message += "  1 = Activated\n";
+    message += "  2 = MPPT/Bulk\n";
+    message += "  3 = Equalizing\n";
+    message += "  4 = Boost\n";
+    message += "  5 = Floating\n";
+    message += "  6 = Current Limiting\n";
+    message += "==========================================\n\n";
   }
 
   uint8_t k, result2;
@@ -280,45 +383,50 @@ void handleNotFound() {
 void setup(void) {
 
   // ESP8266 only has one hardware serial UART, which I'm using with the Wanderer
-  // If you're using an ESP32 or other MCU with more than one UART you will 
+  // If you're using an ESP32 or other MCU with more than one UART you will
   // probably want to use a second serial port for this and use the "main" one for debugging
   // I have commented out any serial debugging that was in the original code
-  
+
   Serial.begin(9600, SERIAL_8N1);
   // Serial.begin(9600); // For debugging
-  
+
   Serial.println(F("Starting..."));
 
   int modbus_address = 255;
   node.begin(modbus_address, Serial);
 
+  // WiFiManager auto-connects to saved WiFi credentials
+  // If connection fails or no credentials saved, it starts a config portal
   WiFi.mode(WIFI_STA);
   WiFi.hostname(wifiHostname);
-  WiFi.begin(ssid, password);
-  // WiFi.begin("NikolaTesla2G", "$unsetHippo1326");
 
   Serial.print("\r\nMAC Address: ");
   Serial.println(WiFi.macAddress());
 
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(1000);
-    Serial.print(".");
+  // Auto-connect to saved WiFi or start config portal if needed
+  // Will create AP "RenogyESP-AutoConnect" if no saved credentials
+  wifiManager.setConfigPortalTimeout(180);  // 3 minute timeout for config portal
+  if (!wifiManager.autoConnect("RenogyESP-AutoConnect")) {
+    Serial.println("Failed to connect and hit timeout");
+    delay(3000);
+    // Reset and try again
+    ESP.restart();
+    delay(5000);
   }
 
-  if (WiFi.status() == WL_CONNECTED){
-    Serial.print("\r\nConnected: local ip address is http://");
-    Serial.println(WiFi.localIP());
-  }
-  
-  MDNS.begin(wifiHostname); 
+  Serial.print("\r\nConnected: local ip address is http://");
+  Serial.println(WiFi.localIP());
+
+  MDNS.begin(wifiHostname);
 
   // Webserver Pages
   server.on("/", handleRoot);
   server.on("/rest", restView);
   server.on("/load", toggleLoad);
+  server.on("/wificonfig", handleWifiConfig);
   server.on("/modbustest", modbustest);
   server.onNotFound(handleNotFound);
- 
+
   server.begin();
   ArduinoOTA.begin();
 }
@@ -395,14 +503,22 @@ void renogy_read_data_registers() {
     renogy_data.controller_uptime_days = data_registers[21];
     renogy_data.total_battery_overcharges = data_registers[22];
     renogy_data.total_battery_fullcharges = data_registers[23];
+
+    // Register 0x120 - Load Status, Load Brightness, Charging State - index 32
+    // High byte: bit 7 = street light status, bits 0-6 = load brightness (0-100%)
+    // Low byte: charging state (0-6)
+    renogy_data.charging_state_raw = data_registers[32];
+    renogy_data.charging_state = renogy_data.charging_state_raw & 0x00FF;  // Extract low byte
+    renogy_data.street_light_status = (renogy_data.charging_state_raw >> 15) & 0x01;  // Extract bit 15
+    renogy_data.load_brightness = (renogy_data.charging_state_raw >> 8) & 0x7F;  // Extract bits 8-14
+
     renogy_data.last_update_time = millis();
 
-    // Add these registers:
+    // TODO: Add these registers in future:
     //Registers 0x118 to 0x119- Total Charging Amp-Hours - 24/25
     //Registers 0x11A to 0x11B- Total Discharging Amp-Hours - 26/27
     //Registers 0x11C to 0x11D- Total Cumulative power generation (kWH) - 28/29
     //Registers 0x11E to 0x11F- Total Cumulative power consumption (kWH) - 30/31
-    //Register 0x120 - Load Status, Load Brightness, Charging State - 32
     //Registers 0x121 to 0x122 - Controller fault codes - 33/34
 
     if (print_data) Serial.println("---");
