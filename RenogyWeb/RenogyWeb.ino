@@ -275,21 +275,50 @@ void toggleLoad(){
 
 // Start WiFi configuration portal on-demand
 void handleWifiConfig(){
-  String message = "<html><body>";
-  message += "<h2>WiFi Configuration</h2>";
-  message += "<p>Starting WiFi configuration portal...</p>";
-  message += "<p>1. Connect to the WiFi network: <strong>RenogyESP-Config</strong></p>";
-  message += "<p>2. A configuration page should open automatically</p>";
-  message += "<p>3. If not, navigate to <strong>192.168.4.1</strong></p>";
-  message += "<p>4. Enter your new WiFi credentials and save</p>";
-  message += "<p>5. The device will restart and connect to the new network</p>";
-  message += "<p><a href='/'>Return to home</a></p>";
-  message += "</body></html>";
-  server.send(200, "text/html", message);
+  // Check if user confirmed the action
+  if(server.hasArg("confirm")){
+    // User clicked the button - proceed with WiFi reset
+    String message = "<html><body>";
+    message += "<h2>WiFi Configuration</h2>";
+    message += "<p><strong>Device is restarting in configuration mode...</strong></p>";
+    message += "<p>After restart:</p>";
+    message += "<p>1. Connect to the WiFi network: <strong>RenogyESP-Config</strong></p>";
+    message += "<p>2. A configuration page should open automatically</p>";
+    message += "<p>3. If not, navigate to <strong>192.168.4.1</strong></p>";
+    message += "<p>4. Enter your new WiFi credentials and save</p>";
+    message += "<p>5. The device will restart and connect to the new network</p>";
+    message += "</body></html>";
+    server.send(200, "text/html", message);
 
-  // Start the configuration portal (non-blocking for 180 seconds)
-  wifiManager.setConfigPortalTimeout(180);
-  wifiManager.startConfigPortal("RenogyESP-Config");
+    // Give time for response to be sent, then restart in config mode
+    delay(3000);
+
+    // Erase saved WiFi credentials and restart to trigger config portal
+    wifiManager.resetSettings();  // Clear saved WiFi credentials from EEPROM
+    delay(1000);
+    ESP.restart();
+  } else {
+    // Show confirmation page
+    String message = "<html><body>";
+    message += "<h2>WiFi Configuration</h2>";
+    message += "<p><strong>Warning:</strong> This will disconnect the device from the current WiFi network and restart it in configuration mode.</p>";
+    message += "<p>You will need to:</p>";
+    message += "<ol>";
+    message += "<li>Connect to the <strong>RenogyESP-Config</strong> WiFi network</li>";
+    message += "<li>Configure new WiFi credentials via the captive portal</li>";
+    message += "<li>Wait for the device to reconnect</li>";
+    message += "</ol>";
+    message += "<p>Current WiFi signal: <strong>" + String(renogy_data.wifi_rssi) + " dBm (" + String(renogy_data.wifi_quality) + ")</strong></p>";
+    message += "<br>";
+    message += "<form action='/wificonfig' method='GET'>";
+    message += "<input type='hidden' name='confirm' value='yes'>";
+    message += "<button type='submit' style='padding:10px 20px; font-size:16px; background-color:#ff6600; color:white; border:none; cursor:pointer;'>Start WiFi Configuration</button>";
+    message += "</form>";
+    message += "<br>";
+    message += "<p><a href='/'>Cancel and return to home</a></p>";
+    message += "</body></html>";
+    server.send(200, "text/html", message);
+  }
 }
 
 // List the modbus registers for debugging
